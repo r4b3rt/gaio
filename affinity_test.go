@@ -20,22 +20,46 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//go:build linux
-
 package gaio
 
 import (
 	"runtime"
-
-	"golang.org/x/sys/unix"
+	"testing"
 )
 
-// setAffinity binds the current goroutine and its underlying thread to a specific CPU.
-// This function locks the goroutine to the current thread, then sets the thread's CPU affinity
-// to the specified CPU, which can improve performance by reducing context switching.
-func setAffinity(cpuId int32) {
-	var newMask unix.CPUSet
-	newMask.Set(int(cpuId))
-	runtime.LockOSThread() // Lock the current goroutine to its current thread
-	_ = unix.SchedSetaffinity(0, &newMask)
+func TestSetAffinityInvalidCPU(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if err := w.SetPollerAffinity(-1); err != ErrCPUID {
+		t.Fatalf("SetPollerAffinity(-1) expected ErrCPUID, got %v", err)
+	}
+	if err := w.SetLoopAffinity(-1); err != ErrCPUID {
+		t.Fatalf("SetLoopAffinity(-1) expected ErrCPUID, got %v", err)
+	}
+
+	invalidCPU := runtime.NumCPU()
+	if err := w.SetPollerAffinity(invalidCPU); err != ErrCPUID {
+		t.Fatalf("SetPollerAffinity(%d) expected ErrCPUID, got %v", invalidCPU, err)
+	}
+	if err := w.SetLoopAffinity(invalidCPU); err != ErrCPUID {
+		t.Fatalf("SetLoopAffinity(%d) expected ErrCPUID, got %v", invalidCPU, err)
+	}
+}
+
+func TestSetLoopAffinityAfterClose(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.SetLoopAffinity(0); err != ErrConnClosed {
+		t.Fatalf("SetLoopAffinity after Close expected ErrConnClosed, got %v", err)
+	}
 }

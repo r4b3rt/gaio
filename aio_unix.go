@@ -20,35 +20,41 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//go:build netbsd || freebsd || openbsd || dragonfly
+//go:build !windows
 
 package gaio
 
-/*
-#include <pthread_np.h>
-#include <pthread.h>
-#include <sys/_cpuset.h>
-#include <sys/cpuset.h>
-
-// lock_thread sets the CPU affinity for the calling thread to the specified CPU.
-// This ensures the thread runs only on the designated CPU.
-void lock_thread(int cpuid) {
-    cpuset_t cpuset;
-    CPU_ZERO(&cpuset);         // Initialize the CPU set to be empty
-    CPU_SET(cpuid, &cpuset);   // Add the specified CPU to the set
-
-    pthread_t tid = pthread_self();  // Get the ID of the calling thread
-    pthread_setaffinity_np(tid, sizeof(cpuset_t), &cpuset);  // Set the thread's CPU affinity
-}
-*/
-import "C"
 import (
-	"runtime"
+	"net"
+	"syscall"
 )
 
-// setAffinity binds the current goroutine and its underlying thread to a specific CPU.
-// This is useful for performance optimization on multi-core systems.
-func setAffinity(cpuId int32) {
-	runtime.LockOSThread()      // Lock the current goroutine to its current thread
-	C.lock_thread(C.int(cpuId)) // Set the thread's CPU affinity to the specified CPU
+// dupconn uses RawConn to dup() a file descriptor
+func dupconn(conn net.Conn) (newfd int, err error) {
+	sc, ok := conn.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	})
+	if !ok {
+		return -1, ErrUnsupported
+	}
+	rc, err := sc.SyscallConn()
+	if err != nil {
+		return -1, ErrUnsupported
+	}
+
+	// Control() guarantees the integrity of file descriptor
+	ec := rc.Control(func(fd uintptr) {
+		newfd, err = syscall.Dup(int(fd))
+	})
+
+	if ec != nil {
+		return -1, ec
+	}
+
+	return
+}
+
+// closeFd closes a file descriptor (Unix)
+func closeFd(fd int) error {
+	return syscall.Close(fd)
 }

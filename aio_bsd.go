@@ -34,13 +34,13 @@ import (
 // poller represents a kqueue-based poller for monitoring file descriptors.
 type poller struct {
 	cpuid int32
-	mu    sync.Mutex // mutex to protect fd closing
+	mu    sync.Mutex // mutex to protect fd closure
 	fd    int        // kqueue fd
 
-	// watchQueue for poll
+	// Queue of fds to register with the poller.
 	watchQueue      []int
 	watchQueueMutex sync.Mutex
-	// closing signal
+	// shutdown signal
 	die     chan struct{}
 	dieOnce sync.Once
 }
@@ -78,35 +78,34 @@ func (p *poller) Close() error {
 	return p.wakeup()
 }
 
-// Watch adds a file descriptor to the list of awaiting-to-be-watched descriptors and wakes up the poller.
+// Watch adds a file descriptor to the registration queue and wakes up the poller.
 func (p *poller) Watch(fd int) error {
 	p.watchQueueMutex.Lock()
 	p.watchQueue = append(p.watchQueue, fd)
 	p.watchQueueMutex.Unlock()
-
 	return p.wakeup()
 }
 
-// wakeup interrupt kevent
+// wakeup interrupts kevent.
 func (p *poller) wakeup() error {
 	p.mu.Lock()
-	if p.fd != -1 {
-		// notify poller
-		_, err := syscall.Kevent(p.fd, []syscall.Kevent_t{{
-			Ident:  0,
-			Filter: syscall.EVFILT_USER,
-			Fflags: syscall.NOTE_TRIGGER,
-		}}, nil, nil)
-		p.mu.Unlock()
-		return err
+	defer p.mu.Unlock()
+	if p.fd == -1 {
+		return ErrPollerClosed
 	}
-	p.mu.Unlock()
-	return ErrPollerClosed
+	// notify poller
+	_, err := syscall.Kevent(p.fd, []syscall.Kevent_t{{
+		Ident:  0,
+		Filter: syscall.EVFILT_USER,
+		Fflags: syscall.NOTE_TRIGGER,
+	}}, nil, nil)
+	return err
 }
 
-// Wait waits for events happen on the file descriptors.
+// Wait waits for events on the file descriptors.
 func (p *poller) Wait(chSignal chan Signal) {
-	var pe pollerEvents
+	// Pre-allocate event set with typical capacity to reduce allocations
+	eventSet := make(pollerEvents, 0, maxEvents)
 	events := make([]syscall.Kevent_t, maxEvents)
 	sig := Signal{
 		done: make(chan struct{}, 1),
@@ -119,8 +118,8 @@ func (p *poller) Wait(chSignal chan Signal) {
 		p.mu.Unlock()
 	}()
 
-	// kqueue eventloop
-	var changes []syscall.Kevent_t
+	// kqueue event loop - pre-allocate the changes slice
+	changes := make([]syscall.Kevent_t, 0, 256)
 	for {
 		select {
 		case <-p.die:
@@ -152,12 +151,15 @@ func (p *poller) Wait(chSignal chan Signal) {
 			}
 			changes = changes[:0]
 
-			// event processing
+			// Event processing
 			for i := 0; i < n; i++ {
 				ev := &events[i]
 				if ev.Ident != 0 {
 					e := event{ident: int(ev.Ident)}
-					if ev.Filter == syscall.EVFILT_READ {
+					if ev.Flags&syscall.EV_ERROR != 0 {
+						// Wake both sides on error to let upper layers handle cleanup.
+						e.ev |= EV_READ | EV_WRITE
+					} else if ev.Filter == syscall.EVFILT_READ {
 						e.ev |= EV_READ
 						// https://golang.org/src/runtime/netpoll_kqueue.go
 						// On some systems when the read end of a pipe
@@ -176,12 +178,12 @@ func (p *poller) Wait(chSignal chan Signal) {
 						e.ev |= EV_WRITE
 					}
 
-					pe = append(pe, e)
+					eventSet = append(eventSet, e)
 				}
 			}
 
 			// notify watcher
-			sig.events = pe
+			sig.events = eventSet
 
 			select {
 			case chSignal <- sig:
@@ -192,7 +194,7 @@ func (p *poller) Wait(chSignal chan Signal) {
 			// wait for the watcher to finish processing
 			select {
 			case <-sig.done:
-				pe = pe[:0]
+				eventSet = eventSet[:0:cap(eventSet)]
 			case <-p.die:
 				return
 			}
@@ -200,10 +202,11 @@ func (p *poller) Wait(chSignal chan Signal) {
 	}
 }
 
-// raw read for nonblocking op to avert context switch
+// rawRead performs non-blocking reads to avoid context switches.
 // NOTE:
 //  1. we need to make sure that the fd has O_NONBLOCK set.
-//  2. use RawSyscall to avoid context switch
+//  2. use RawSyscall to avoid a context switch
+//  3. r0 is set to -1 on error, which becomes MaxUint when converted to int on 64-bit
 func rawRead(fd int, p []byte) (n int, err error) {
 	var _p0 unsafe.Pointer
 	if len(p) > 0 {
@@ -212,14 +215,14 @@ func rawRead(fd int, p []byte) (n int, err error) {
 		_p0 = unsafe.Pointer(&_zero)
 	}
 	r0, _, e1 := syscall.RawSyscall(syscall.SYS_READ, uintptr(fd), uintptr(_p0), uintptr(len(p)))
-	n = int(r0)
 	if e1 != 0 {
-		err = e1
+		return -1, e1
 	}
-	return
+	return int(r0), nil
 }
 
-// raw write for nonblocking op to avert context switch
+// rawWrite performs non-blocking writes to avoid context switches.
+// NOTE: r0 is set to -1 on error, which becomes MaxUint when converted to int on 64-bit
 func rawWrite(fd int, p []byte) (n int, err error) {
 	var _p0 unsafe.Pointer
 	if len(p) > 0 {
@@ -228,9 +231,8 @@ func rawWrite(fd int, p []byte) (n int, err error) {
 		_p0 = unsafe.Pointer(&_zero)
 	}
 	r0, _, e1 := syscall.RawSyscall(syscall.SYS_WRITE, uintptr(fd), uintptr(_p0), uintptr(len(p)))
-	n = int(r0)
 	if e1 != 0 {
-		err = e1
+		return -1, e1
 	}
-	return
+	return int(r0), nil
 }

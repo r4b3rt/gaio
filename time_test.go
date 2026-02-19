@@ -20,22 +20,42 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//go:build linux
-
 package gaio
 
 import (
-	"runtime"
-
-	"golang.org/x/sys/unix"
+	"container/heap"
+	"testing"
+	"time"
 )
 
-// setAffinity binds the current goroutine and its underlying thread to a specific CPU.
-// This function locks the goroutine to the current thread, then sets the thread's CPU affinity
-// to the specified CPU, which can improve performance by reducing context switching.
-func setAffinity(cpuId int32) {
-	var newMask unix.CPUSet
-	newMask.Set(int(cpuId))
-	runtime.LockOSThread() // Lock the current goroutine to its current thread
-	_ = unix.SchedSetaffinity(0, &newMask)
+func TestTimedHeapOrderAndIndex(t *testing.T) {
+	var h timedHeap
+	heap.Push(&h, &aiocb{deadline: time.Unix(10, 0)})
+	heap.Push(&h, &aiocb{deadline: time.Unix(5, 0)})
+	heap.Push(&h, &aiocb{deadline: time.Unix(7, 0)})
+
+	for i, cb := range h {
+		if cb.idx != i {
+			t.Fatalf("idx not updated: want %d got %d", i, cb.idx)
+		}
+	}
+
+	pop1 := heap.Pop(&h).(*aiocb)
+	pop2 := heap.Pop(&h).(*aiocb)
+	pop3 := heap.Pop(&h).(*aiocb)
+
+	if !pop1.deadline.Before(pop2.deadline) || !pop2.deadline.Before(pop3.deadline) {
+		t.Fatal("timedHeap did not pop in ascending deadline order")
+	}
+}
+
+func TestTimedHeapSwapUpdatesIndex(t *testing.T) {
+	a := &aiocb{idx: 0}
+	b := &aiocb{idx: 1}
+	h := timedHeap{a, b}
+
+	h.Swap(0, 1)
+	if a.idx != 1 || b.idx != 0 {
+		t.Fatalf("Swap did not update idx: a=%d b=%d", a.idx, b.idx)
+	}
 }

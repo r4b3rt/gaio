@@ -20,10 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//go:build !(linux || netbsd || freebsd || openbsd || dragonfly)
+//go:build !linux && !windows
 
 package gaio
 
-// bind thread & goroutine to a specific CPU
+// bind the thread and goroutine to a specific CPU
 func setAffinity(cpuId int32) {
 }
